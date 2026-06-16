@@ -1,5 +1,10 @@
 mysql-connector-python==8.2.0
-pandas==2.2.0
-streamlit==1.31.0
 requests==2.31.0
 python-dotenv==1.0.1
+streamlit==1.35.0
+pandas==2.2.2
+SQLAlchemy==2.0.30
+PyMySQL==1.1.0
+python-dotenv==1.0.1
+scikit-learn==1.4.2
+umap-learn==0.5.6

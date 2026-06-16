@@ -126,3 +126,14 @@ CREATE TABLE Team_Member_Move (
     FOREIGN KEY (move_id) REFERENCES Move(move_id),
     CHECK (slot_number BETWEEN 1 AND 4)
 );
+
+SELECT 
+    p.name AS pokemon_name,
+    m.name AS move_name,
+    COUNT(*) AS times_seen together
+FROM Team_Member_Move tmm
+JOIN Move m ON tmm.move_id = m.move_id
+JOIN Team_Member tm ON tmm.member_id = tm.member_id
+JOIN Pokemon p ON tm.species_id = p.species_id
+GROUP BY p.name, m.name
+ORDER BY p.name ASC, times_seen_together DESC;

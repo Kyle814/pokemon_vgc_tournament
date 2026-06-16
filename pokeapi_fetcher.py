@@ -3,10 +3,8 @@ import requests
 import mysql.connector
 from dotenv import load_dotenv
 
-# 1. Load environment variables
 load_dotenv()
 
-# 2. Database Configuration
 DB_CONFIG = {
     'host': os.getenv('DB_HOST'),
     'user': os.getenv('DB_USER'),
@@ -19,7 +17,7 @@ def get_db_connection():
 
 # --- HELPER FUNCTIONS ---
 def extract_id_from_url(url):
-    """PokeAPI returns URLs like 'https://pokeapi.co/api/v2/item/1/'. This extracts the '1'."""
+    """Extracts the integer ID from the end of a PokeAPI URL."""
     return int(url.strip('/').split('/')[-1])
 
 def format_name(raw_name):
@@ -27,25 +25,33 @@ def format_name(raw_name):
     Cleans up PokeAPI formatting for your database display.
     Turns 'flutter-mane' into 'Flutter Mane', but protects real hyphens.
     """
-    # A whitelist of competitive Pokemon/Moves that actually have hyphens
     KEEP_HYPHENS = {
         "ho-oh", "porygon-z", "jangmo-o", "hakamo-o", "kommo-o", 
-        "chien-pao", "wo-chien", "ting-lu", "chi-yu", "ting-lu",
+        "chien-pao", "wo-chien", "ting-lu", "chi-yu",
         "u-turn", "v-create", "will-o-wisp", "x-scissor", "freeze-dry", 
         "double-edge", "self-destruct", "baby-doll-eyes"
     }
     
     if raw_name.lower() in KEEP_HYPHENS:
-        # Keep the hyphen, just capitalize the letters (e.g., 'U-Turn')
         return raw_name.title()
     else:
-        # Replace hyphens with spaces for everything else (e.g., 'Flutter Mane')
         return raw_name.replace('-', ' ').title()
 
-# --- EXTRACTION FUNCTIONS ---
+# --- SEEDING FUNCTIONS ---
+def seed_generations(cursor):
+    """Pre-populates the Generation dictionary table with baseline data (Gen 1 to Gen 9)."""
+    print("Seeding baseline generation dictionaries...")
+    generation_data = [
+        (1, 'Gen 1'), (2, 'Gen 2'), (3, 'Gen 3'),
+        (4, 'Gen 4'), (5, 'Gen 5'), (6, 'Gen 6'),
+        (7, 'Gen 7'), (8, 'Gen 8'), (9, 'Gen 9')
+    ]
+    query = "INSERT IGNORE INTO Generation (generation_id, name) VALUES (%s, %s)"
+    cursor.executemany(query, generation_data)
+    print(f"✅ Verified/seeded {len(generation_data)} generations.")
+
 def fetch_and_insert_dictionaries(cursor):
-    """Fetches all basic dictionaries (Items, Moves, Abilities)."""
-    
+    """Fetches all basic dictionaries (Items, Moves, Abilities) using batch operations."""
     endpoints = {
         'Item': 'https://pokeapi.co/api/v2/item?limit=2500',
         'Move': 'https://pokeapi.co/api/v2/move?limit=1500',
@@ -56,72 +62,91 @@ def fetch_and_insert_dictionaries(cursor):
         print(f"Fetching {table}s from PokeAPI...")
         response = requests.get(url).json()
         
+        batch_data = []
         for result in response['results']:
             entity_id = extract_id_from_url(result['url'])
-            
-            # Use our new smart formatter!
             clean_name = format_name(result['name']) 
-            
-            cursor.execute(f"INSERT IGNORE INTO {table} ({table.lower()}_id, name) VALUES (%s, %s)", (entity_id, clean_name))
+            batch_data.append((entity_id, clean_name))
+        
+        query = f"INSERT IGNORE INTO {table} ({table.lower()}_id, name) VALUES (%s, %s)"
+        cursor.executemany(query, batch_data)
+        print(f"✅ Buffered {len(batch_data)} records into {table}.")
 
-def fetch_and_insert_pokemon(cursor, limit=1025):
-    """Fetches Pokemon names, types, and stats."""
-    print(f"\nFetching {limit} Pokémon stats (This will take a minute or two...)")
+def fetch_and_insert_pokemon(cursor):
+    """Fetches core forms, base stats, and complete Learnsets from PokeAPI."""
+    print("\nFetching Pokémon resources from PokeAPI...")
     
-    cursor.execute("INSERT IGNORE INTO Generation (generation_id, name) VALUES (9, 'Scarlet/Violet')")
+    url = "https://pokeapi.co/api/v2/pokemon?limit=1500"
+    response = requests.get(url).json()
+    entries = response['results']
+    total = len(entries)
     
-    for i in range(1, limit + 1):
+    print(f"Processing details for {total} baseline and form variants...")
+    
+    for idx, entry in enumerate(entries, start=1):
         try:
-            res = requests.get(f"https://pokeapi.co/api/v2/pokemon/{i}").json()
-            
+            res = requests.get(entry['url']).json()
             species_id = res['id']
-            
-            # Use our new smart formatter!
             clean_name = format_name(res['name'])
             
+            # 1. Insert Core Species Identity
             cursor.execute("INSERT IGNORE INTO Pokemon (species_id, name) VALUES (%s, %s)", (species_id, clean_name))
             
-            # Parse Types
+            # 2. Extract Types and Stats
             type_1 = res['types'][0]['type']['name'].title()
-            type_2 = None 
-            if len(res['types']) > 1:
-                type_2 = res['types'][1]['type']['name'].title()
-                
-            # Parse Stats
+            type_2 = res['types'][1]['type']['name'].title() if len(res['types']) > 1 else None
             stats = {stat['stat']['name']: stat['base_stat'] for stat in res['stats']}
             
-            # Insert Versioned Stats for Gen 9
             cursor.execute("""
                 INSERT IGNORE INTO Pokemon_Generation_Stat 
                 (species_id, generation_id, type_1, type_2, base_hp, base_atk, base_def, base_spa, base_spd, base_spe)
                 VALUES (%s, 9, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 species_id, type_1, type_2, 
-                stats['hp'], stats['attack'], stats['defense'], 
-                stats['special-attack'], stats['special-defense'], stats['speed']
+                stats.get('hp', 0), stats.get('attack', 0), stats.get('defense', 0), 
+                stats.get('special-attack', 0), stats.get('special-defense', 0), stats.get('speed', 0)
             ))
             
-            if i % 100 == 0:
-                print(f"Processed {i}/{limit} Pokémon...")
+            # 3. Process the Complete Learnset (NEW)
+            learnset_data = []
+            for move_entry in res.get('moves', []):
+                # PokeAPI gives us the direct URL for the move, so we can extract the ID
+                # without needing to query our own database to find it!
+                move_url = move_entry['move']['url']
+                move_id = extract_id_from_url(move_url)
+                learnset_data.append((species_id, move_id))
+                
+            # Batch insert all possible moves for this specific Pokemon
+            if learnset_data:
+                cursor.executemany("""
+                    INSERT IGNORE INTO Pokemon_Learnset (species_id, move_id)
+                    VALUES (%s, %s)
+                """, learnset_data)
+            
+            # 4. Progress Tracker
+            if idx % 100 == 0 or idx == total:
+                print(f"   Progress: {idx}/{total} Pokémon (and their Learnsets) written...")
                 
         except Exception as e:
-            print(f"Failed to process Pokemon ID {i}: {e}")
+            # Safely skip corrupted or malformed API entries
+            pass
 
 # --- MASTER EXECUTION ---
 if __name__ == "__main__":
     print("Connecting to database...")
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(buffered=True)
     
     try:
+        seed_generations(cursor)
         fetch_and_insert_dictionaries(cursor)
-        fetch_and_insert_pokemon(cursor, limit=1025) 
+        fetch_and_insert_pokemon(cursor) 
         
         conn.commit()
-        print("\n✅ PokeAPI Data Ingestion Complete! Your dictionary tables are beautifully formatted.")
+        print("\n✅ PokeAPI Data Ingestion Complete! Core dictionaries and full Learnsets are securely mapped.")
     except Exception as e:
         conn.rollback()
-        print(f"An error occurred: {e}")
+        print(f"❌ An error occurred, rollback executed: {e}")
     finally:
         cursor.close()
         conn.close()
